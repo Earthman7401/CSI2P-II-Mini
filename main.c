@@ -233,7 +233,7 @@ AST *parse(Token *token_array, int start, int end, GrammarState state) {
 		case UNARY_EXPR:
 			if (token_array[start].type == PREINC || token_array[start].type == PREDEC || token_array[start].type == PLUS || token_array[start].type == MINUS) {
 				current = new_AST(token_array[start].type, 0);
-				current->mid = parse(token_array, start, end - 1, UNARY_EXPR);
+				current->mid = parse(token_array, start + 1, end, UNARY_EXPR);
 				return current;
 			}
 			return parse(token_array, start, end, POSTFIX_EXPR);
@@ -301,15 +301,23 @@ void semantic_check(AST *current) {
 	if (current == NULL) return;
 	// Left operand of '=' must be an identifier or identifier with one or more parentheses.
 	if (current->type == ASSIGN) {
-		AST *tmp = current->lhs;
-		while (tmp->type == LPAR) tmp = tmp->mid;
-		if (tmp->type != IDENTIFIER)
+		AST *lhs = current->lhs;
+		while (lhs->type == LPAR) lhs = lhs->mid;
+		if (lhs->type != IDENTIFIER)
 			err("Lvalue is required as left operand of assignment.");
 	}
 	// Operand of INC/DEC must be an identifier or identifier with one or more parentheses.
-	// TODO: Implement the remaining semantic_check code.
-	// hint: Follow the instruction above and ASSIGN-part code to implement.
-	// hint: Semantic of each node needs to be checked recursively (from the current node to lhs/mid/rhs node).
+	else if (current->type == PREINC || current->type == PREDEC || current->type == POSTINC || current->type == POSTDEC) {
+		AST* lhs = current->lhs;
+		while (lhs->type == LPAR) lhs = lhs->mid;
+		if (lhs->type != IDENTIFIER)
+			err("Lvalue is required as operand of increment / decrement.")
+	}
+	else {
+		semantic_check(current->lhs);
+		semantic_check(current->mid);
+		semantic_check(current->rhs);
+	}
 }
 
 void codegen(AST *root) {
