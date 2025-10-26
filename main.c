@@ -363,14 +363,14 @@ ASMOperation AST_type_to_operation(Type type) {
 		return (ASMOperation)(IADD + type % 2);
 }
 
-Instruction *_codegen(AST *root, Instruction *head, int preinc_count[3], int postinc_count[3]) {
+Instruction *_codegen(AST *root, Instruction *head, int preinc_count[3], int postinc_count[3], int* next_register) {
 	if (root == NULL) return head;
 	
 	Instruction *current = NULL;
 	// every instruction uses previous register + 1, so no repeated regs
 	switch (root->type) {
 		case ASSIGN:
-			current = _codegen(root->rhs, head, preinc_count, postinc_count);
+			current = _codegen(root->rhs, head, preinc_count, postinc_count, next_register);
 			current->next = new_instruction(IADD, root->lhs->val - 'x', current->operands[0], 0, REGISTER, REGISTER, LITERAL);
 			return current->next;
 		case ADD:
@@ -378,41 +378,41 @@ Instruction *_codegen(AST *root, Instruction *head, int preinc_count[3], int pos
 		case MUL:
 		case DIV:
 		case REM:
-			Instruction *lhs = _codegen(root->lhs, head, preinc_count, postinc_count);
-			Instruction *rhs = _codegen(root->rhs, lhs, preinc_count, postinc_count);
-			rhs->next = new_instruction(AST_type_to_operation(root->type), rhs->operands[0] + 1, lhs->operands[0], rhs->operands[0], REGISTER, REGISTER, REGISTER);
+			Instruction *lhs = _codegen(root->lhs, head, preinc_count, postinc_count, next_register);
+			Instruction *rhs = _codegen(root->rhs, lhs, preinc_count, postinc_count, next_register);
+			rhs->next = new_instruction(AST_type_to_operation(root->type), (*next_register)++, lhs->operands[0], rhs->operands[0], REGISTER, REGISTER, REGISTER);
 			return rhs->next;
 		case PREINC:
-			current = _codegen(root->mid, head, preinc_count, postinc_count);
+			current = _codegen(root->mid, head, preinc_count, postinc_count, next_register);
 			preinc_count[current->operands[0]]++;
 			current->next = new_instruction(INONE, head->operands[0], head->operands[1], head->operands[2], NONE, NONE, NONE);
 			return current;
 		case PREDEC:
-			current = _codegen(root->mid, head, preinc_count, postinc_count);
+			current = _codegen(root->mid, head, preinc_count, postinc_count, next_register);
 			preinc_count[current->operands[0]]--;
 			current->next = new_instruction(INONE, head->operands[0], head->operands[1], head->operands[2], NONE, NONE, NONE);
 			return current;
 		case POSTINC:
-			current = _codegen(root->mid, head, preinc_count, postinc_count);
+			current = _codegen(root->mid, head, preinc_count, postinc_count, next_register);
 			postinc_count[current->operands[0]]++;
 			current->next = new_instruction(INONE, head->operands[0], head->operands[1], head->operands[2], NONE, NONE, NONE);
 			return current;
 		case POSTDEC:
-			current = _codegen(root->mid, head, preinc_count, postinc_count);
+			current = _codegen(root->mid, head, preinc_count, postinc_count, next_register);
 			postinc_count[current->operands[0]]--;
 			current->next = new_instruction(INONE, head->operands[0], head->operands[1], head->operands[2], NONE, NONE, NONE);
 			return current;
 		case PLUS:
 		case MINUS:
-			current = _codegen(root->mid, head, preinc_count, postinc_count);
+			current = _codegen(root->mid, head, preinc_count, postinc_count, next_register);
 			current->next = new_instruction(AST_type_to_operation(root->type), current->operands[0], 0, current->operands[0], REGISTER, LITERAL, REGISTER);
 			return current;
 		case IDENTIFIER:
 			return head->next = new_instruction(INONE, root->val - 'x', 0, 0, NONE, NONE, NONE);
 		case CONSTANT:
-			return head->next = new_instruction(IADD, head->operands[0] + 1, root->val, 0, REGISTER, LITERAL, LITERAL);
+			return head->next = new_instruction(IADD, (*next_register)++, root->val, 0, REGISTER, LITERAL, LITERAL);
 		case LPAR:
-			return _codegen(root->mid, head, preinc_count, postinc_count);
+			return _codegen(root->mid, head, preinc_count, postinc_count, next_register);
 		default:
 			err("unexpected AST node type");
 	}
@@ -422,8 +422,9 @@ Instruction *codegen(AST *root) {
 	int preinc_count[3] = {0, 0, 0};
 	int postinc_count[3] = {0, 0, 0};
 
+	int empty_register = 3;
 	Instruction *head = new_instruction(INONE, 2, 0, 0, NONE, NONE, NONE);
-	Instruction *tail = _codegen(root, head, preinc_count, postinc_count);
+	Instruction *tail = _codegen(root, head, preinc_count, postinc_count, &empty_register);
 
 	for (int i = 0; i < 3; i++) {
 		// add pre-increments / decrements		
