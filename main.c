@@ -10,11 +10,18 @@ For the language grammar, please refer to Grammar section on the github page:
 
 #define MAX_LENGTH 200
 typedef enum {
+	NONE, REGISTER, LITERAL, ADDRESS
+} OperandType;
+typedef enum {
 	ASSIGN, ADD, SUB, MUL, DIV, REM, PREINC, PREDEC, POSTINC, POSTDEC, IDENTIFIER, CONSTANT, LPAR, RPAR, PLUS, MINUS, END
 } Type;
 typedef enum {
 	STMT, EXPR, ASSIGN_EXPR, ADD_EXPR, MUL_EXPR, UNARY_EXPR, POSTFIX_EXPR, PRI_EXPR
 } GrammarState;
+typedef enum {
+	ILOAD, ISTORE, IADD, ISUB, IMUL, IDIV, IREM, INONE
+} ASMOperation;
+char* asm_translation_table[7] = {"load", "store", "add", "sub", "mul", "div", "rem"};
 typedef struct TokenUnit {
 	Type type;
 	int val; // record the integer value or variable name
@@ -25,6 +32,12 @@ typedef struct ASTUnit {
 	int val; // record the integer value or variable name
 	struct ASTUnit *lhs, *mid, *rhs;
 } AST;
+typedef struct InstructionUnit {
+	ASMOperation operation;
+	int operands[3];
+	int operand_type[3];
+	struct InstructionUnit* next;
+} Instruction;
 
 /// utility interfaces
 
@@ -43,6 +56,8 @@ typedef struct ASTUnit {
 Token *lexer(const char *in);
 // Create a new token.
 Token *new_token(Type type, int val);
+// Create a new instruction.
+Instruction *new_instruction(ASMOperation operation, int operand1, int operand2, int operand3, OperandType type1, OperandType type2, OperandType type3);
 // Translate a token linked list into array, return its length.
 size_t token_list_to_arr(Token **head);
 // Parse the token array. Return the constructed AST.
@@ -63,10 +78,16 @@ int condMUL(Type type);
 int condRPAR(Type type);
 // Check if the AST is semantically right. This function will call err() automatically if check failed.
 void semantic_check(AST *current);
-// Generate ASM code.
-void codegen(AST *root);
+// Converts token types to asm operations.
+ASMOperation AST_type_to_operation(Type type);
+// Generate ASM code. Returns the head of the instuction list.
+Instruction* codegen(AST *root);
 // Free the whole AST.
 void freeAST(AST *current);
+// Free the instruction list.
+void free_instructions(Instruction* head);
+// Print ASM instructions.
+void ASM_print(Instruction *head);
 
 /// debug interfaces
 
@@ -84,7 +105,8 @@ int main() {
 		if (len == 0) continue;
 		AST *ast_root = parser(content, len);
 		semantic_check(ast_root);
-		codegen(ast_root);
+		Instruction *instruction_head = codegen(ast_root);
+		ASM_print(instruction_head);
 		free(content);
 		freeAST(ast_root);
 	}
@@ -155,6 +177,19 @@ Token *new_token(Type type, int val) {
 	Token *res = (Token*)malloc(sizeof(Token));
 	res->type = type;
 	res->val = val;
+	res->next = NULL;
+	return res;
+}
+
+Instruction *new_instruction(ASMOperation operation, int operand1, int operand2, int operand3, OperandType type1, OperandType type2, OperandType type3) {
+	Instruction *res = (Instruction*)malloc(sizeof(Instruction));
+	res->operation = operation;
+	res->operands[0] = operand1;
+	res->operands[1] = operand2;
+	res->operands[2] = operand3;
+	res->operand_type[0] = type1;
+	res->operand_type[1] = type2;
+	res->operand_type[2] = type3;
 	res->next = NULL;
 	return res;
 }
@@ -297,32 +332,164 @@ int condRPAR(Type type) {
 	return type == RPAR;
 }
 
-void semantic_check(AST *current) {
-	if (current == NULL) return;
+void semantic_check(AST *root) {
+	if (root == NULL) return;
 	// Left operand of '=' must be an identifier or identifier with one or more parentheses.
-	if (current->type == ASSIGN) {
-		AST *lhs = current->lhs;
+	if (root->type == ASSIGN) {
+		AST *lhs = root->lhs;
 		while (lhs->type == LPAR) lhs = lhs->mid;
 		if (lhs->type != IDENTIFIER)
 			err("Lvalue is required as left operand of assignment.");
 	}
 	// Operand of INC/DEC must be an identifier or identifier with one or more parentheses.
-	else if (current->type == PREINC || current->type == PREDEC || current->type == POSTINC || current->type == POSTDEC) {
-		AST* lhs = current->lhs;
-		while (lhs->type == LPAR) lhs = lhs->mid;
-		if (lhs->type != IDENTIFIER)
+	else if (root->type == PREINC || root->type == PREDEC || root->type == POSTINC || root->type == POSTDEC) {
+		AST *mid = root->mid;
+		while (mid->type == LPAR) mid = mid->mid;
+		if (mid->type != IDENTIFIER)
 			err("Lvalue is required as operand of increment / decrement.")
 	}
-	else {
-		semantic_check(current->lhs);
-		semantic_check(current->mid);
-		semantic_check(current->rhs);
+
+	semantic_check(root->lhs);
+	semantic_check(root->mid);
+	semantic_check(root->rhs);
+}
+
+ASMOperation AST_type_to_operation(Type type) {
+	if (type >= ADD && type <= REM) // ADD / SUB / MUL / DIV / REM
+		return (ASMOperation)(type - ADD + IADD);
+	if (type >= PREINC && type <= POSTDEC) // INC / DEC
+		return (ASMOperation)(IADD + type % 2);
+	if (type == PLUS || type == MINUS)
+		return (ASMOperation)(IADD + type % 2);
+}
+
+Instruction *_codegen(AST *root, Instruction *head, int preinc_count[3], int postinc_count[3]) {
+	if (root == NULL) return head;
+	
+	Instruction *current = NULL;
+	// every instruction uses previous register + 1, so no repeated regs
+	switch (root->type) {
+		case ASSIGN:
+			current = _codegen(root->rhs, head, preinc_count, postinc_count);
+			current->next = new_instruction(IADD, root->lhs->val - 'x', current->operands[0], 0, REGISTER, REGISTER, LITERAL);
+			return current->next;
+		case ADD:
+		case SUB:
+		case MUL:
+		case DIV:
+		case REM:
+			Instruction *lhs = _codegen(root->lhs, head, preinc_count, postinc_count);
+			Instruction *rhs = _codegen(root->rhs, lhs, preinc_count, postinc_count);
+			rhs->next = new_instruction(AST_type_to_operation(root->type), rhs->operands[0] + 1, lhs->operands[0], rhs->operands[0], REGISTER, REGISTER, REGISTER);
+			return rhs->next;
+		case PREINC:
+			current = _codegen(root->mid, head, preinc_count, postinc_count);
+			preinc_count[current->operands[0]]++;
+			current->next = new_instruction(INONE, head->operands[0], head->operands[1], head->operands[2], NONE, NONE, NONE);
+			return current;
+		case PREDEC:
+			current = _codegen(root->mid, head, preinc_count, postinc_count);
+			preinc_count[current->operands[0]]--;
+			current->next = new_instruction(INONE, head->operands[0], head->operands[1], head->operands[2], NONE, NONE, NONE);
+			return current;
+		case POSTINC:
+			current = _codegen(root->mid, head, preinc_count, postinc_count);
+			postinc_count[current->operands[0]]++;
+			current->next = new_instruction(INONE, head->operands[0], head->operands[1], head->operands[2], NONE, NONE, NONE);
+			return current;
+		case POSTDEC:
+			current = _codegen(root->mid, head, preinc_count, postinc_count);
+			postinc_count[current->operands[0]]--;
+			current->next = new_instruction(INONE, head->operands[0], head->operands[1], head->operands[2], NONE, NONE, NONE);
+			return current;
+		case PLUS:
+		case MINUS:
+			current = _codegen(root->mid, head, preinc_count, postinc_count);
+			current->next = new_instruction(AST_type_to_operation(root->type), current->operands[0], 0, current->operands[0], REGISTER, LITERAL, REGISTER);
+			return current;
+		case IDENTIFIER:
+			return head->next = new_instruction(INONE, root->val - 'x', 0, 0, NONE, NONE, NONE);
+		case CONSTANT:
+			return head->next = new_instruction(IADD, head->operands[0] + 1, root->val, 0, REGISTER, LITERAL, LITERAL);
+		case LPAR:
+			return _codegen(root->mid, head, preinc_count, postinc_count);
+		default:
+			err("unexpected AST node type");
 	}
 }
 
-void codegen(AST *root) {
-	// TODO: Implement your codegen in your own way.
-	// You may modify the function parameter or the return type, even the whole structure as you wish.
+Instruction *codegen(AST *root) {
+	int preinc_count[3] = {0, 0, 0};
+	int postinc_count[3] = {0, 0, 0};
+
+	Instruction *head = new_instruction(INONE, 2, 0, 0, NONE, NONE, NONE);
+	Instruction *tail = _codegen(root, head, preinc_count, postinc_count);
+
+	for (int i = 0; i < 3; i++) {
+		// add pre-increments / decrements		
+		Instruction *current = new_instruction(IADD + (preinc_count[i] < 0), i, i, preinc_count[i] > 0 ? preinc_count[i] : -preinc_count[i], REGISTER, REGISTER, LITERAL);
+		current->next = head->next;
+		head->next = current;
+
+		current = new_instruction(ILOAD, i, i * 4, 0, REGISTER, ADDRESS, NONE);
+		current->next = head->next;
+		head->next = current;
+
+		// add post-increments / decrements
+		current = new_instruction(IADD + (postinc_count[i] < 0), i, i, postinc_count[i] > 0 ? postinc_count[i] : -postinc_count[i], REGISTER, REGISTER, LITERAL);
+		tail->next = current;
+		tail = current;
+		
+		current = new_instruction(ISTORE, i * 4, i, 0, ADDRESS, REGISTER, NONE);
+		tail->next = current;
+		tail = current;
+	}
+
+	return head;
+}
+
+void free_instructions(Instruction *head) {
+	if (head == NULL) return;
+
+	free_instructions(head->next);
+	free(head);
+}
+
+void ASM_print(Instruction *head) {
+	Instruction *current = head->next;
+	if (current == NULL) return;
+	if (current->operation == INONE) {
+		ASM_print(head->next);
+		return;
+	}
+	
+	char instruction[30];
+	memset(instruction, 0, sizeof(instruction));
+	
+	strcpy(instruction, asm_translation_table[current->operation]);
+	int index = strlen(asm_translation_table[current->operation]);
+	instruction[index++] = ' ';
+
+	for (int i = 0; i < 3; i++) {
+		switch(current->operand_type[i]) {
+			case NONE:
+				break;
+			case REGISTER:
+				index += sprintf(&instruction[index], "r%d ", current->operands[i]);
+				break;
+			case LITERAL:
+				index += sprintf(&instruction[index], "%d ", current->operands[i]);
+				break;
+			case ADDRESS:
+				index += sprintf(&instruction[index], "[%d] ", current->operands[i]);
+				break;
+			default:
+				fputs("=== unknown operand type ===", stderr);
+		}
+	}
+
+	printf("%s\n", instruction);
+	ASM_print(head->next);
 }
 
 void freeAST(AST *current) {
