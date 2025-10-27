@@ -82,6 +82,14 @@ void semantic_check(AST *current);
 ASMOperation AST_type_to_operation(Type type);
 // Generate ASM code. Returns the head of the instuction list.
 Instruction* codegen(AST *root);
+// Check if the instruction assigns the value one register directly to another and returns the value operand.
+int is_assignment(Instruction instruction);
+// replace registers with other registers.
+void replace_registers(Instruction* head, int target, int value);
+// Replace registers with precalculated values in the entire list.
+void replace_precalculated(Instruction* head, int target, int value);
+// Optimize ASM instructions.
+void optimize(Instruction* head);
 // Free the whole AST.
 void freeAST(AST *current);
 // Free the instruction list.
@@ -106,6 +114,7 @@ int main() {
 		AST *ast_root = parser(content, len);
 		semantic_check(ast_root);
 		Instruction *instruction_head = codegen(ast_root);
+		optimize(instruction_head);
 		ASM_print(instruction_head);
 		free(content);
 		freeAST(ast_root);
@@ -448,6 +457,90 @@ Instruction *codegen(AST *root) {
 	}
 
 	return head;
+}
+
+void replace_registers(Instruction* head, int target, int value) {
+	if (head == NULL) return;
+
+	for (int i = 1; i < 3; i++) {
+		if (head->operand_type[i] == REGISTER && head->operands[i] == target)
+			head->operands[i] = value;
+	}
+	replace_registers(head->next, target, value);
+}
+
+void replace_precalculated(Instruction* head, int target, int value) {
+	if (head == NULL || head->operand_type[0] == REGISTER && head->operands[0] == target) return;
+
+	for (int i = 1; i < 3; i++) {
+		if (head->operand_type[i] == REGISTER && head->operands[i] == target) {
+			head->operand_type[i] = LITERAL;
+			head->operands[i] = value;
+		}
+	}
+	replace_precalculated(head->next, target, value);
+}
+
+int is_assignment(Instruction instruction) {
+	if (instruction.operation == ISTORE || instruction.operation == ILOAD) return 0;
+
+	if (instruction.operand_type[1] == LITERAL && instruction.operand_type[2] == REGISTER) {
+		if (instruction.operation >= IADD) return instruction.operands[1] == 0;
+		if (instruction.operation == IMUL) return instruction.operands[1] == 1;
+	}
+	else if (instruction.operand_type[1] == REGISTER && instruction.operand_type[2] == LITERAL) {
+		if (instruction.operation >= IADD && instruction.operation <= ISUB) return 2 * (instruction.operands[2] == 0);
+		if (instruction.operation >= IMUL && instruction.operation <= IDIV) return 2 * (instruction.operands[2] == 1);
+	}
+	else return 0;
+}
+
+void optimize(Instruction* head) {
+	Instruction *current = head->next;
+	if (current == NULL) return;
+
+	// skip nops
+	if (current->operation == INONE) {
+		head->next = current->next;
+		free(current);
+		optimize(head);
+	}
+
+	// skip assignments
+	else if (is_assignment(*current)) {
+		replace_registers(current->next, current->operands[0], current->operands[1]);
+		head->next = current->next;
+		free(current);
+		optimize(head);
+	}
+
+	// precalculate literals
+	else if (current->operation >= IADD && current->operation <= IREM && current->operand_type[1] == LITERAL && current->operand_type[2] == LITERAL) {
+		int value;
+		switch (current->operation) {
+			case IADD:
+				value = current->operands[1] + current->operands[2];
+				break;
+			case ISUB:
+				value = current->operands[1] - current->operands[2];
+				break;
+			case IMUL:
+				value = current->operands[1] * current->operands[2];
+				break;
+			case IDIV:
+				value = current->operands[1] / current->operands[2];
+				break;
+			case IREM:
+				value = current->operands[1] % current->operands[2];
+				break;
+		}
+		
+		replace_precalculated(current->next, current->operands[0], value);
+		head->next = current->next;
+		free(current);
+		optimize(head);
+	}
+	else optimize(head->next);
 }
 
 void free_instructions(Instruction *head) {
